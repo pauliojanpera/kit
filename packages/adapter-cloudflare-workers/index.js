@@ -2,49 +2,53 @@ import fs from 'fs';
 import { execSync } from 'child_process';
 import esbuild from 'esbuild';
 import toml from '@iarna/toml';
-import { fileURLToPath } from 'url';
+import { generate_worker } from './worker_generator.js';
 
 /**
  * @typedef {import('esbuild').BuildOptions} BuildOptions
  */
 
 /** @type {import('.')} */
-export default function (options) {
+export default function ({
+	assets_prefix = '',
+	scheduled_route = '',
+	esbuild: esbuild_config = undefined
+}) {
 	return {
 		name: '@sveltejs/adapter-cloudflare-workers',
 
 		async adapt({ utils }) {
 			const { site } = validate_config(utils);
 
-			const bucket = site.bucket;
+			const bucket = site['bucket'];
 			const entrypoint = site['entry-point'] || 'workers-site';
-
-			const files = fileURLToPath(new URL('./files', import.meta.url));
 
 			utils.rimraf(bucket);
 			utils.rimraf(entrypoint);
 
-			utils.log.info('Installing worker dependencies...');
-			utils.copy(`${files}/_package.json`, '.svelte-kit/cloudflare-workers/package.json');
-
-			// TODO would be cool if we could make this step unnecessary somehow
-			const stdout = execSync('npm install', { cwd: '.svelte-kit/cloudflare-workers' });
-			utils.log.info(stdout.toString());
+			const worker_path = '.svelte-kit/cloudflare-workers';
 
 			utils.log.minor('Generating worker...');
-			utils.copy(`${files}/entry.js`, '.svelte-kit/cloudflare-workers/entry.js');
-
 			/** @type {BuildOptions} */
-			const default_options = {
-				entryPoints: ['.svelte-kit/cloudflare-workers/entry.js'],
-				outfile: `${entrypoint}/index.js`,
-				bundle: true,
-				target: 'es2020',
-				platform: 'browser'
+			const default_build_options = {
+				...generate_worker({
+					// TODO hardcoding the relative location makes this brittle
+					app_js_path: '../output/server/app.js',
+					worker_path,
+					assets_prefix,
+					scheduled_route
+				}),
+				outfile: `${entrypoint}/index.js`
 			};
 
-			const build_options =
-				options && options.esbuild ? await options.esbuild(default_options) : default_options;
+			// TODO would be cool if we could make this step unnecessary somehow
+			utils.log.info('Installing worker dependencies...');
+			const stdout = execSync('npm install', { cwd: worker_path });
+			utils.log.info(stdout.toString());
+
+			const build_options = esbuild_config
+				? await esbuild_config(default_build_options)
+				: default_build_options;
 
 			await esbuild.build(build_options);
 
@@ -56,8 +60,8 @@ export default function (options) {
 			});
 
 			utils.log.minor('Copying assets...');
-			utils.copy_static_files(bucket);
-			utils.copy_client_files(bucket);
+			utils.copy_static_files(bucket + assets_prefix);
+			utils.copy_client_files(bucket + assets_prefix);
 		}
 	};
 }
@@ -73,7 +77,7 @@ function validate_config(utils) {
 			throw err;
 		}
 
-		if (!wrangler_config.site || !wrangler_config.site.bucket) {
+		if (!wrangler_config.site || !wrangler_config.site['bucket']) {
 			throw new Error(
 				'You must specify site.bucket in wrangler.toml. Consult https://developers.cloudflare.com/workers/platform/sites/configuration'
 			);
